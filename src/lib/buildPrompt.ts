@@ -1,57 +1,47 @@
+import type { EndpointParameters } from "./server/endpoints/endpoints";
 import type { BackendModel } from "./server/models";
-import type { Message } from "./types/Message";
-import { collections } from "$lib/server/database";
-import { ObjectId } from "mongodb";
-/**
- * Convert [{user: "assistant", content: "hi"}, {user: "user", content: "hello"}] to:
- *
- * <|assistant|>hi<|endoftext|><|prompter|>hello<|endoftext|><|assistant|>
- */
+import type { Tool, ToolResult } from "./types/Tool";
 
-export async function buildPrompt(
-	messages: Pick<Message, "from" | "content">[],
-	model: BackendModel,
-	webSearchId?: string
-): Promise<string> {
-	const prompt =
-		messages
-			.map(
-				(m) =>
-					(m.from === "user"
-						? model.userMessageToken + m.content
-						: model.assistantMessageToken + m.content) +
-					(model.messageEndToken
-						? m.content.endsWith(model.messageEndToken)
-							? ""
-							: model.messageEndToken
-						: "")
-			)
-			.join("") + model.assistantMessageToken;
+type buildPromptOptions = Pick<EndpointParameters, "messages" | "preprompt" | "continueMessage"> & {
+	model: BackendModel;
+	tools?: Tool[];
+	toolResults?: ToolResult[];
+};
 
-	let webPrompt = "";
+export async function buildPrompt({
+	messages,
+	model,
+	preprompt,
+	continueMessage,
+	tools,
+	toolResults,
+}: buildPromptOptions): Promise<string> {
+	const filteredMessages = messages;
 
-	if (webSearchId) {
-		const webSearch = await collections.webSearches.findOne({
-			_id: new ObjectId(webSearchId),
-		});
-
-		if (!webSearch) throw new Error("Web search not found");
-
-		if (webSearch.summary) {
-			webPrompt =
-				model.assistantMessageToken +
-				`The following context was found while searching the internet: ${webSearch.summary}` +
-				model.messageEndToken;
-		}
+	if (filteredMessages[0].from === "system" && preprompt) {
+		filteredMessages[0].content = preprompt;
 	}
-	const finalPrompt =
-		model.preprompt +
-		webPrompt +
-		prompt
-			.split(" ")
-			.slice(-(model.parameters?.truncate ?? 0))
-			.join(" ");
 
-	// Not super precise, but it's truncated in the model's backend anyway
-	return finalPrompt;
+	let prompt = model
+		.chatPromptRender({
+			messages: filteredMessages,
+			preprompt,
+			tools,
+			toolResults,
+		})
+		// Not super precise, but it's truncated in the model's backend anyway
+		.split(" ")
+		.slice(-(model.parameters?.truncate ?? 0))
+		.join(" ");
+
+	if (continueMessage && model.parameters?.stop) {
+		prompt = model.parameters.stop.reduce((acc: string, curr: string) => {
+			if (acc.endsWith(curr)) {
+				return acc.slice(0, acc.length - curr.length);
+			}
+			return acc;
+		}, prompt.trimEnd());
+	}
+
+	return prompt;
 }
