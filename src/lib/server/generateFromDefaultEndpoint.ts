@@ -1,43 +1,30 @@
-import { defaultModel } from "$lib/server/models";
-import { modelEndpoint } from "./modelEndpoint";
-import { textGeneration } from "@huggingface/inference";
-import { trimSuffix } from "$lib/utils/trimSuffix";
-import { trimPrefix } from "$lib/utils/trimPrefix";
-import { PUBLIC_SEP_TOKEN } from "$lib/constants/publicSepToken";
+import { smallModel } from "$lib/server/models";
+import type { EndpointMessage } from "./endpoints/endpoints";
 
-interface Parameters {
-	temperature: number;
-	truncate: number;
-	max_new_tokens: number;
-	stop: string[];
-}
-export async function generateFromDefaultEndpoint(
-	prompt: string,
-	parameters?: Partial<Parameters>
-) {
-	const newParameters = {
-		...defaultModel.parameters,
-		...parameters,
-		return_full_text: false,
-	};
+export async function generateFromDefaultEndpoint({
+	messages,
+	preprompt,
+	generateSettings,
+}: {
+	messages: EndpointMessage[];
+	preprompt?: string;
+	generateSettings?: Record<string, unknown>;
+}): Promise<string> {
+	const endpoint = await smallModel.getEndpoint();
 
-	const endpoint = modelEndpoint(defaultModel);
-	let { generated_text } = await textGeneration(
-		{
-			model: endpoint.url,
-			inputs: prompt,
-			parameters: newParameters,
-		},
-		{
-			fetch: (url, options) =>
-				fetch(url, {
-					...options,
-					headers: { ...options?.headers, Authorization: endpoint.authorization },
-				}),
+	const tokenStream = await endpoint({ messages, preprompt, generateSettings });
+
+	for await (const output of tokenStream) {
+		// if not generated_text is here it means the generation is not done
+		if (output.generated_text) {
+			let generated_text = output.generated_text;
+			for (const stop of [...(smallModel.parameters?.stop ?? []), "<|endoftext|>"]) {
+				if (generated_text.endsWith(stop)) {
+					generated_text = generated_text.slice(0, -stop.length).trimEnd();
+				}
+			}
+			return generated_text;
 		}
-	);
-
-	generated_text = trimSuffix(trimPrefix(generated_text, "<|startoftext|>"), PUBLIC_SEP_TOKEN);
-
-	return generated_text;
+	}
+	throw new Error("Generation failed");
 }
